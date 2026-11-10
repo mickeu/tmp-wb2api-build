@@ -1,0 +1,478 @@
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index ce65036..b0c4099 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -39,6 +39,7 @@ import (
+ 	"github.com/yreidev/workbuddy2api-panel/internal/server"
+ 	"github.com/yreidev/workbuddy2api-panel/internal/session"
+ 	"github.com/yreidev/workbuddy2api-panel/internal/upstream"
++	"github.com/yreidev/workbuddy2api-panel/internal/balance"
+ 	"github.com/yreidev/workbuddy2api-panel/internal/usage"
+ )
+ 
+@@ -332,6 +333,13 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
+ 	usagePath := usagePathFor(cfg.StateFile)
+ 	rec := usage.New(usagePath)
+ 	rec.SetRetentionDays(cfg.Logging.UsageRetentionDays)
++
++	// 每日余额快照：上游 usage.credit 对缓存命中的请求不计费，累加值小于余额
++	// 实际降幅，所以「今天花了多少分」用余额差来算，需要把每天的收盘余额留下来。
++	balRec, balErr := balance.New(filepath.Dir(cfg.StateFile))
++	if balErr != nil {
++		log.Printf("[balance] 每日余额快照不可用: %v", balErr)
++	}
+ 	rec.Start()
+ 	defer rec.Stop()
+ 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s，%s)", usagePath, rec.Describe(), retentionText(cfg.Logging.UsageRetentionDays))
+@@ -392,7 +400,39 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
+ 		runtimeLogText(cfg.Logging.CreditLogEnabled, cfg.Logging.CreditLogRetentionDays, cfg.Logging.CreditLogMaxMB))
+ 	logs := logStores{requests: requestLog, task: taskLog, system: systemLog, credit: creditLog, usage: rec}
+ 
++	var balArg *balance.Recorder
++	if balErr == nil {
++		balArg = balRec
++	}
++	// 每 5 分钟采一次余额：跨过 0 点时的第一笔采样就是「昨日收盘 / 今日开盘」，
++	// 5 分钟粒度足以让日切线落在 0 点后几分钟内，对「今日消耗」的影响可忽略。
++	if balArg != nil {
++		go func() {
++			sample := func() {
++				var sum, grant int64
++				for _, st := range p.List() {
++					sum += st.Credits
++					grant += st.CreditsTotal
++				}
++				// 开机首轮余额刷新失败时内存余额为 0，退回 state.json 的最后已知值。
++				if sum <= 0 {
++					if c, g, err := balance.ReadStateCredits(cfg.StateFile); err == nil && c > 0 {
++						sum, grant = c, g
++					}
++				}
++				balRec.Sample(sum, grant, time.Now())
++			}
++			sample()
++			t := time.NewTicker(time.Minute)
++			defer t.Stop()
++			for range t.C {
++				sample()
++			}
++		}()
++		log.Printf("[balance] 每日余额快照已启用: %s", filepath.Join(filepath.Dir(cfg.StateFile), "balance-daily.jsonl"))
++	}
+ 	pn := panel.New(panel.Config{
++		Balance: balArg,
+ 		Pool:        p,
+ 		Usage:       rec,
+ 		Keys:        keys,
+diff --git a/internal/balance/snapshot.go b/internal/balance/snapshot.go
+new file mode 100644
+index 0000000..f167dda
+--- /dev/null
++++ b/internal/balance/snapshot.go
+@@ -0,0 +1,197 @@
++// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
++// SPDX-License-Identifier: AGPL-3.0-only
++
++// Package balance 记录每日余额快照。
++//
++// 上游 usage 接口的 credits 取自每次请求返回的 usage.credit，缓存命中的请求通常
++// 不计费，累加值与账号余额的实际降幅对不上；要回答「今天花了多少分」只能拿
++// 余额差来算：
++//
++//	今日消耗 = 昨日收盘余额 + 今日发放 - 当前余额
++//
++// 本包只管「余额」，发放量由 credit_log 提供。
++package balance
++
++import (
++	"bufio"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"sync"
++	"time"
++)
++
++// Entry 一个自然日（东八区）的余额快照。
++type Entry struct {
++	Day        string  `json:"day"`         // 2026-11-06
++	Opening    int64   `json:"opening"`     // 当天 0 点余额（= 前一天的 Closing）
++	Closing    int64   `json:"closing"`     // 当天最后一次采样余额
++	OpenGrant  int64   `json:"open_grant"`  // 当天首次采样时的累计发放
++	TotalGrant int64   `json:"total_grant"` // 最近一次采样的累计发放
++	SampledAt  string  `json:"sampled_at"`  // 最后一次采样时间 RFC3339
++	Spent      int64   `json:"spent"`       // 当天消耗 = Opening + 当天发放 - Closing
++}
++
++// ReadStateCredits 读 state.json 里最后落盘的余额。
++//
++// 开机后第一轮余额刷新失败时，内存里的余额会是 0（上游账号接口偶发连不上），
++// 此时用 state.json 的最后已知值兜底，避免把当天消耗算成整个开盘余额。
++func ReadStateCredits(stateFile string) (credits, grant int64, err error) {
++	raw, err := os.ReadFile(stateFile)
++	if err != nil {
++		return 0, 0, err
++	}
++	var st struct {
++		Accounts json.RawMessage `json:"accounts"`
++	}
++	if err = json.Unmarshal(raw, &st); err != nil {
++		return 0, 0, err
++	}
++	type acct struct {
++		Credits      int64 `json:"credits"`
++		CreditsTotal int64 `json:"credits_total"`
++	}
++	// accounts 在 state.json 里是 uid -> 账号 的字典，早期版本可能是数组，两种都认。
++	var list []acct
++	if err = json.Unmarshal(st.Accounts, &list); err != nil {
++		var m map[string]acct
++		if err = json.Unmarshal(st.Accounts, &m); err != nil {
++			return 0, 0, err
++		}
++		for _, a := range m {
++			list = append(list, a)
++		}
++	}
++	for _, a := range list {
++		credits += a.Credits
++		grant += a.CreditsTotal
++	}
++	return credits, grant, nil
++}
++
++// Recorder 按天落盘的余额记录器。文件为 JSON Lines，一天一行，按天覆盖。
++type Recorder struct {
++	path string
++
++	mu      sync.Mutex
++	entries map[string]*Entry // day -> entry
++}
++
++// New 打开（或创建）指定目录下的 balance-daily.jsonl。
++func New(dir string) (*Recorder, error) {
++	if err := os.MkdirAll(dir, 0o755); err != nil {
++		return nil, err
++	}
++	r := &Recorder{path: filepath.Join(dir, "balance-daily.jsonl"), entries: map[string]*Entry{}}
++	if err := r.load(); err != nil && !os.IsNotExist(err) {
++		return nil, err
++	}
++	return r, nil
++}
++
++func (r *Recorder) load() error {
++	f, err := os.Open(r.path)
++	if err != nil {
++		return err
++	}
++	defer f.Close()
++	sc := bufio.NewScanner(f)
++	sc.Buffer(make([]byte, 64*1024), 1024*1024)
++	for sc.Scan() {
++		var e Entry
++		if json.Unmarshal(sc.Bytes(), &e) == nil && e.Day != "" {
++			r.entries[e.Day] = &e
++		}
++	}
++	return sc.Err()
++}
++
++var cst = time.FixedZone("CST", 8*3600)
++
++// Day 返回 t 在东八区所属的自然日。
++func Day(t time.Time) string { return t.In(cst).Format("2006-01-02") }
++
++// Sample 采样当前余额总和。同一天重复调用会覆盖当天的 Closing，
++// Opening 只在当天第一次采样时定下（取传入的 opening，第一次通常就是当前值）。
++func (r *Recorder) Sample(total int64, grantTotal int64, at time.Time) Entry {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++
++	day := Day(at)
++	// 启动初期还有账号没拉到余额，此时总和为 0，不能当作真实收盘写盘，
++	// 否则当天消耗会被算成整个开盘余额。
++	if total <= 0 {
++		if e, ok := r.entries[day]; ok {
++			return *e
++		}
++		return Entry{Day: day}
++	}
++	e, ok := r.entries[day]
++	if !ok {
++		e = &Entry{Day: day, Opening: total, OpenGrant: grantTotal}
++		r.entries[day] = e
++	}
++	e.Closing = total
++	e.TotalGrant = grantTotal
++	e.SampledAt = at.In(cst).Format(time.RFC3339)
++	// 当天消耗 = 开盘余额 + 当天发放 - 当前余额。
++	// 开盘余额优先取昨日收盘；没有昨日快照时退回当天首次采样值。
++	if prev, ok := r.entries[Day(at.AddDate(0, 0, -1))]; ok {
++		e.Opening = prev.Closing
++	}
++	// 当天发放 = 当前累计发放 - 开盘时累计发放。
++	issued := grantTotal - e.OpenGrant
++	if issued < 0 {
++		issued = 0
++	}
++	e.Spent = e.Opening + issued - total
++	r.flush()
++	return *e
++}
++
++// Get 取某天的快照。
++func (r *Recorder) Get(day string) (Entry, bool) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	e, ok := r.entries[day]
++	if !ok {
++		return Entry{}, false
++	}
++	return *e, true
++}
++
++// Series 取最近 n 天的快照，按日期升序。
++func (r *Recorder) Series(n int) []Entry {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	now := time.Now().In(cst)
++	out := make([]Entry, 0, n)
++	for i := n - 1; i >= 0; i-- {
++		day := Day(now.AddDate(0, 0, -i))
++		if e, ok := r.entries[day]; ok {
++			out = append(out, *e)
++		}
++	}
++	return out
++}
++
++// flush 全量重写文件（一天一行，条目数上限 365）。
++func (r *Recorder) flush() {
++	tmp := r.path + ".tmp"
++	f, err := os.Create(tmp)
++	if err != nil {
++		return
++	}
++	w := bufio.NewWriter(f)
++	for _, e := range r.entries {
++		b, err := json.Marshal(e)
++		if err != nil {
++			continue
++		}
++		w.Write(b)
++		w.WriteByte('\n')
++	}
++	w.Flush()
++	f.Close()
++	os.Rename(tmp, r.path)
++}
+diff --git a/internal/panel/history_compat.go b/internal/panel/history_compat.go
+new file mode 100644
+index 0000000..fd0fa05
+--- /dev/null
++++ b/internal/panel/history_compat.go
+@@ -0,0 +1,115 @@
++// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
++// SPDX-License-Identifier: AGPL-3.0-only
++// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/yreidev/workbuddy2api-panel
++
++package panel
++
++import (
++	"net/http"
++	"strconv"
++	"time"
++
++	"github.com/yreidev/workbuddy2api-panel/internal/balance"
++	"github.com/yreidev/workbuddy2api-panel/internal/logarchive"
++	"github.com/yreidev/workbuddy2api-panel/internal/upstream"
++)
++
++// creditHistoryCompat adapts actual earning records; earning credits have no before/after balance.
++func (p *Panel) creditHistoryCompat(w http.ResponseWriter, r *http.Request) {
++	limit := 200
++	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
++		limit = min(n, creditLogMax)
++	}
++	entries := make([]map[string]any, 0)
++	if p.cfg.CreditLog != nil {
++		rows, _, err := logarchive.Read(p.cfg.CreditLog, logarchive.Query[upstream.Earning]{
++			Limit: limit,
++			Time:  func(e upstream.Earning) time.Time { return e.Time },
++		})
++		if err != nil {
++			writeErr(w, http.StatusInternalServerError, err.Error())
++			return
++		}
++		for _, e := range rows {
++			entries = append(entries, map[string]any{
++				"account": e.Nickname, "uid": e.UID, "delta": e.Credit, "time": e.Time,
++			})
++		}
++	}
++	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "limit": limit})
++}
++
++// balanceHistoryCompat 返回每日余额快照。快照从网关启动后按日采样，
++// 没装 Balance 记录器或还没跨过一天时序列为空（不编造数据点）。
++func (p *Panel) balanceHistoryCompat(w http.ResponseWriter, r *http.Request) {
++	days := 7
++	if n, err := strconv.Atoi(r.URL.Query().Get("days")); err == nil && n > 0 {
++		days = min(n, 365)
++	}
++	series := []any{}
++	if p.cfg.Balance != nil {
++		for _, e := range p.cfg.Balance.Series(days) {
++			series = append(series, map[string]any{
++				"day": e.Day, "opening": e.Opening, "closing": e.Closing,
++				"total_grant": e.TotalGrant, "spent": e.Spent, "sampled_at": e.SampledAt,
++			})
++		}
++	}
++	writeJSON(w, http.StatusOK, map[string]any{
++		"days": days, "now": time.Now().Format(time.RFC3339), "series": series,
++	})
++}
++
++// creditToday 按余额差计算「今日消耗」。
++//
++//	今日消耗 = 开盘余额 + 当天发放 - 当前余额
++//
++// 三个数都来自 balance.Recorder 的当日快照，与上游 usage.credit 的口径无关：
++// 后者对缓存命中的请求不计费，累加值小于余额实际降幅。
++func (p *Panel) creditToday(w http.ResponseWriter, r *http.Request) {
++	if p.cfg.Balance == nil {
++		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "balance recorder not configured"})
++		return
++	}
++	day := balance.Day(time.Now())
++	e, ok := p.cfg.Balance.Get(day)
++	if !ok {
++		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "no sample for today yet", "day": day})
++		return
++	}
++	issued := e.TotalGrant - e.OpenGrant
++	if issued < 0 {
++		issued = 0
++	}
++	writeJSON(w, http.StatusOK, map[string]any{
++		"ok": true, "day": day,
++		"opening": e.Opening, "issued": issued,
++		"current": e.Closing, "spent": e.Spent,
++		"sampled_at": e.SampledAt,
++	})
++}
++
++// tasksJobs 兼容接口：把执行队列以 jobs 列表返回。
++//
++// 与 tasksQueueStatus 同一份队列状态；除 items 外另给 jobs 键，
++// 供只认 jobs 字段的调用方使用。队列未启动时 jobs 为空数组。
++// （本 handler 在交付的源码包里缺失，panel.go 只注册了路由；
++// 生产参考二进制里该路由存在，此处按 tasksQueueStatus 的同一状态补齐。）
++func (p *Panel) tasksJobs(w http.ResponseWriter, r *http.Request) {
++	q := p.queue()
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	items := make([]queueItem, len(q.items))
++	copy(items, q.items)
++	writeJSON(w, http.StatusOK, map[string]any{
++		"ok":         true,
++		"running":    q.running,
++		"total":      len(items),
++		"conc":       q.conc,
++		"started":    !q.startedAt.IsZero(),
++		"started_at": q.startedAt,
++		"seq":        q.seq,
++		"jobs":       items,
++		"items":      items,
++	})
++}
+diff --git a/internal/panel/panel.go b/internal/panel/panel.go
+index d9a1784..5aae360 100644
+--- a/internal/panel/panel.go
++++ b/internal/panel/panel.go
+@@ -35,6 +35,7 @@ import (
+ 	"github.com/yreidev/workbuddy2api-panel/internal/changelog"
+ 	"github.com/yreidev/workbuddy2api-panel/internal/httpauth"
+ 	"github.com/yreidev/workbuddy2api-panel/internal/livecfg"
++"github.com/yreidev/workbuddy2api-panel/internal/balance"
+ 	"github.com/yreidev/workbuddy2api-panel/internal/logarchive"
+ 	"github.com/yreidev/workbuddy2api-panel/internal/pool"
+ 	"github.com/yreidev/workbuddy2api-panel/internal/proxies"
+@@ -80,6 +81,10 @@ type Config struct {
+ 
+ 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
+ 	Usage *usage.Recorder
++	// Balance 每日余额快照（nil = 余额接口只返回空序列）。
++	// 上游 usage.credit 对缓存命中的请求不计费，累加值小于余额实际降幅，
++	// 回答「今天花了多少」只能靠每日收盘余额差。
++	Balance *balance.Recorder
+ 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
+ 	RequestLog *reqlog.Recorder
+ 	// TaskLog / SystemLog 运行日志里任务、系统两个频道的留存归档：每行入环后按频道落盘，
+@@ -214,6 +219,9 @@ func (p *Panel) routes() {
+ 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
+ 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
+ 	p.mux.HandleFunc("GET /panel/api/credit_log", p.withAuth(p.creditLog))
++	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistoryCompat))
++	p.mux.HandleFunc("GET /panel/api/balance_history", p.withAuth(p.balanceHistoryCompat))
++	p.mux.HandleFunc("GET /panel/api/credit_today", p.withAuth(p.creditToday))
+ 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
+ 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
+ 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
+@@ -250,6 +258,7 @@ func (p *Panel) routes() {
+ 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
+ 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
+ 	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
++	p.mux.HandleFunc("GET /panel/api/tasks/jobs", p.withAuth(p.tasksJobs))
+ 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
+ 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
+ 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
+diff --git a/internal/usage/usage.go b/internal/usage/usage.go
+index 2e719a9..b2ae272 100644
+--- a/internal/usage/usage.go
++++ b/internal/usage/usage.go
+@@ -42,6 +42,10 @@ var flushInterval = 30 * time.Second
+ var maxBuckets = 400_000
+ 
+ // hourLayout / dayLayout 分片键的时间格式（本地时区，与用户直觉一致）。
++// cstZone 统一小时/天桶的写入与解析时区；iOS 构建 time.Local 为 UTC，
++// 只有写入用了北京时会导致桶被判到 8 小时之后而永远查不到。
++var cstZone = time.FixedZone("CST", 8*60*60)
++
+ const (
+ 	hourLayout = "2006-01-02T15"
+ 	dayLayout  = "2006-01-02"
+@@ -193,7 +197,8 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
+ 	if model == "" {
+ 		model = "(unknown)"
+ 	}
+-	scope := "h:" + now.Format(hourLayout)
++	// 固定北京时（与调度器 cstZone 一致），避免 iOS 构建 time.Local 硬编码 UTC 导致小时桶标签偏 8 小时
++	scope := "h:" + now.In(cstZone).Format(hourLayout)
+ 	key := bucketKey(scope, realm, uid, model, d.ModelRate, d.Key)
+ 
+ 	r.mu.Lock()
+@@ -263,7 +268,7 @@ func (r *Recorder) Rollup(now time.Time) {
+ 		if !strings.HasPrefix(b.Scope, "h:") {
+ 			continue
+ 		}
+-		ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local)
++		ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), cstZone)
+ 		if err != nil || !ts.Before(cutoff) {
+ 			continue
+ 		}
+@@ -628,10 +633,10 @@ func (w Window) bounds() (time.Time, time.Time) {
+ // bucketTime 把桶 scope 解析成本地时间；脏 scope 返回 false（不进任何口径）。
+ func bucketTime(scope string) (time.Time, bool) {
+ 	if strings.HasPrefix(scope, "h:") {
+-		ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(scope, "h:"), time.Local)
++		ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(scope, "h:"), cstZone)
+ 		return ts, err == nil
+ 	}
+-	ts, err := time.ParseInLocation(dayLayout, strings.TrimPrefix(scope, "d:"), time.Local)
++	ts, err := time.ParseInLocation(dayLayout, strings.TrimPrefix(scope, "d:"), cstZone)
+ 	return ts, err == nil
+ }
+ 
