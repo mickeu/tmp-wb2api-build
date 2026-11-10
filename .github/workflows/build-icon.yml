@@ -1,0 +1,33 @@
+name: build-icon
+
+on:
+  workflow_dispatch:
+
+jobs:
+  icon:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: xcodebuild -version && xcrun --sdk iphoneos --show-sdk-version
+
+      - name: actool
+        run: |
+          mkdir -p out
+          xcrun actool app/Assets.xcassets \
+            --compile out \
+            --platform iphoneos \
+            --minimum-deployment-target 15.0 \
+            --app-icon AppIcon \
+            --output-partial-info-plist out/partial.plist \
+            --target-device iphone \
+            --target-device ipad \
+            --errors --warnings --notices
+          ls -l out
+          plutil -p out/partial.plist || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: icon-dist
+          path: out
