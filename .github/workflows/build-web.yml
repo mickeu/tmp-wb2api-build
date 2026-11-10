@@ -1,0 +1,20 @@
+name: build-web
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: install
+        run: cd web && npm ci
+      - name: build (vite only, skip lint/test)
+        run: cd web && ./node_modules/.bin/vite build
+      - name: postbuild gitkeep
+        run: cd web && node -e "require('fs').writeFileSync('../internal/panel/dist/.gitkeep','')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-dist
+          path: internal/panel/dist
