@@ -69,6 +69,7 @@ cp "$ROOT/wb2api/config.example.json" "$APP/config.example.json"
 chmod 0644 "$APP/Info.plist" "$APP/PkgInfo" "$APP/config.example.json"
 echo "== 图标：Assets.car（三态 Any/Dark/Tinted）+ 旧式 PNG 兜底 =="
 cp "$ROOT/app/Assets.car" "$APP/Assets.car"
-python3 "$ROOT/scripts/gen_icons.py" "$APP"
+# 旧式 PNG 仅在本机有 PIL 时生成，iOS 15+ 一律用 Assets.car 里的三态图标
+if python3 -c "import PIL" 2>/dev/null; then python3 "$ROOT/scripts/gen_icons.py" "$APP"; else echo "  (skip 旧式 PNG：无 PIL，Assets.car 已覆盖)"; fi
 ls -l "$APP"
 echo "build_app 完成：$APP"

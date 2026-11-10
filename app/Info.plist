@@ -49,15 +49,6 @@
 	<dict>
 		<key>CFBundlePrimaryIcon</key>
 		<dict>
-			<key>CFBundleIconFiles</key>
-			<array>
-				<string>AppIcon60x60</string>
-				<string>AppIcon40x40</string>
-				<string>AppIcon29x29</string>
-				<string>AppIcon20x20</string>
-			</array>
-			<key>UIPrerenderedIcon</key>
-			<false/>
 			<key>CFBundleIconName</key>
 			<string>AppIcon</string>
 		</dict>
