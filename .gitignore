@@ -1,0 +1,55 @@
+# Auth & secrets
+auths/
+data/
+*.key
+*.pem
+*.env
+.env
+.env.*
+
+# Binaries (anchored to repo root only — bare "login"/"credit" would also ignore cmd/login/, cmd/credit/)
+/login
+/credit
+/wb2api
+/signin_bin
+
+# Config with secrets (use config.example.json)
+config.json
+
+# Build artifacts
+*.tmp
+__pycache__/
+
+# 面板前端（web/）的依赖与构建产物。dist 只保留 .gitkeep（没构建前端时 go:embed 也能通过编译）
+web/node_modules/
+internal/panel/dist/*
+!internal/panel/dist/.gitkeep
+
+# Backups (contains auth tokens)
+backups/
+
+# IDE
+.idea/
+.vscode/
+LOOP.md
+PLAN.md
+SPEC.md
+
+# 设计/计划文档（但 README.md、AGENTS.md 与 docs/ 下的使用文档必须进版本库）
+*.md
+!README.md
+!/docs/*.md
+# 给 AI 编程工具看的仓库说明
+!/AGENTS.md
+!/CLAUDE.md
+
+# Windows binaries
+/wb2api.exe
+/login.exe
+/credit.exe
+
+# 本地验证工具（判据逆向过程脚本，结论沉淀于 data/desktop-task-protocol.md）
+/cmd/desktopverify*/
+*.zip
+server.exe
+.DS_Store
