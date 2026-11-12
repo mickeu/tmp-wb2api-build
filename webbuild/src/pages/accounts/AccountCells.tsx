@@ -1,0 +1,126 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/yreidev/workbuddy2api-panel
+
+// 账号的各个展示单元（名称、状态、积分、用量），账号表、账号卡片、详情抽屉共用。
+import { Chip, ProgressBar } from '@heroui/react'
+import { activeRateLimits, creditPercent, isUnlimited, rateLimitInfo, type Health } from '../../lib/accounts'
+import { dur, formatLatency, formatRate, formatTokenCount, fmtTok, timeMs, until } from '../../lib/format'
+import type { Account } from '../../lib/types'
+import { Hint } from '../../components/Hint'
+
+export function AccountName({ a }: { a: Account }) {
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center gap-1.5">
+        <span className={`truncate font-medium ${a.nickname ? '' : 'text-muted'}`}>{a.nickname || '未命名'}</span>
+        <RealmChips a={a} />
+      </div>
+      <div className="truncate font-mono text-xs text-muted">{a.uid.length > 16 ? a.uid.slice(0, 16) + '…' : a.uid}</div>
+    </div>
+  )
+}
+
+/** 国际版 / 企业版标签（账号名旁边、详情抽屉标题） */
+export function RealmChips({ a }: { a: Account }) {
+  return (
+    <>
+      {a.realm === 'global' && <Chip size="sm" variant="soft" color="accent">国际版</Chip>}
+      {a.enterprise && <Chip size="sm" variant="soft" color="default">企业版</Chip>}
+    </>
+  )
+}
+
+export function HealthChip({ health, now }: { health: Health; now: number }) {
+  if (health.state === 'disabled') return <Chip size="sm" variant="soft" color="danger">已禁用</Chip>
+  const cooling = health.coolEnd != null && (
+    <Chip size="sm" variant="soft" color="warning">{health.kind} · {dur((health.coolEnd - now) / 1000)}</Chip>
+  )
+  if (health.state === 'paused') {
+    // 暂停选号的号也可能同时在冷却，两个都标出来（不然只看到「解冻」按钮不知道为什么）
+    return (
+      <span className="inline-flex flex-wrap gap-1">
+        <Chip size="sm" variant="soft" color="default">已暂停选号</Chip>
+        {cooling}
+      </span>
+    )
+  }
+  return cooling || <Chip size="sm" variant="soft" color="success">可用</Chip>
+}
+
+export function StatusCell({ a, health, now }: { a: Account; health: Health; now: number }) {
+  return (
+    <div className="flex min-w-40 flex-col items-start gap-1">
+      <HealthChip health={health} now={now} />
+      {a.reason && <span className="line-clamp-2 max-w-40 text-xs text-muted">{a.reason}</span>}
+      <RateLimitList a={a} now={now} />
+    </div>
+  )
+}
+
+/**
+ * 暂时不能用的模型，每个一行：模型名 + 多久后解封（限流）或「不可用」。
+ * 完整的解封时间、网关最早重试时间写在悬停提示和详情抽屉里。
+ */
+export function RateLimitList({ a, now }: { a: Account; now: number }) {
+  const rows = activeRateLimits(a)
+  if (!rows.length) return null
+  return (
+    <ul className="flex max-w-48 flex-col gap-0.5 text-xs" aria-label="暂时不能用的模型">
+      {rows.map((row) => {
+        const info = rateLimitInfo(row, now)
+        return (
+          // 模型名不截断：放不下时说明文字换到下一行
+          <li key={row.model}>
+            <Hint tip={info.model + '\n' + info.detail} className="flex flex-wrap items-baseline gap-x-1.5">
+              <span className={`size-1.5 shrink-0 translate-y-[-1px] rounded-full ${info.unavailable ? 'bg-muted' : 'bg-warning'}`} />
+              <span className="break-all font-mono">{info.model}</span>
+              <span className={`whitespace-nowrap ${info.unavailable ? 'text-muted' : 'text-warning'}`}>{info.short}</span>
+            </Hint>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+/** 最早到期的一批积分：「3 天后到期 120 分」（路由按最早到期优先选号，这里能看出为什么选它） */
+export function EarliestExpiry({ a, now }: { a: Account; now: number }) {
+  const at = timeMs(a.credits_earliest_expiry)
+  if (at == null || at <= now || !a.credits_earliest_remaining) return null
+  return <span className="text-xs text-muted">{until(at, now)}到期 {fmtTok(a.credits_earliest_remaining)} 分</span>
+}
+
+export function CreditsCell({ a, poolMax, now }: { a: Account; poolMax: number; now: number }) {
+  const unlimited = isUnlimited(a)
+  if (a.credits == null && !unlimited) return <span className="text-muted">—</span>
+  const pct = creditPercent(a, poolMax)
+  // 企业版的总额是分配给这个号的额度（企业池总额成员号查不到），悬停说明一下
+  const tip = unlimited ? '企业版不限量' : a.enterprise ? '企业版：剩余额度 / 分配额度（按周期重置）' : undefined
+  return (
+    <Hint tip={tip} className="flex min-w-28 flex-col gap-1">
+      <span className="font-mono text-sm tabular-nums">
+        {unlimited ? '不限' : a.credits}
+        {!unlimited && !!a.credits_total && <span className="text-xs text-muted">/{a.credits_total}</span>}
+      </span>
+      <ProgressBar aria-label={unlimited ? '不限量' : a.credits_total ? `剩余 ${pct}%` : '积分（相对池内最高）'} value={pct} size="sm" className="max-w-28">
+        <ProgressBar.Track><ProgressBar.Fill /></ProgressBar.Track>
+      </ProgressBar>
+      <EarliestExpiry a={a} now={now} />
+    </Hint>
+  )
+}
+
+/** 最近一次请求的用量：次数 / token / 延迟 / 速率 */
+export function UsageChips({ a }: { a: Account }) {
+  const tu = a.token_usage || {}
+  const total = formatTokenCount(tu.total_tokens)
+  return (
+    <div className="flex flex-wrap gap-1">
+      <Chip size="sm" variant="soft" color="accent">{tu.request_count || 0} 次</Chip>
+      <Chip size="sm" variant="soft" color="accent">{total}{total !== '—' && ' tok'}</Chip>
+      <Chip size="sm" variant="soft" color="warning">{formatLatency(tu.last_latency_ms)}</Chip>
+      <Chip size="sm" variant="soft" color="success">{formatRate(tu.last_tokens_per_second)}</Chip>
+    </div>
+  )
+}
