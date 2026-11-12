@@ -19,6 +19,7 @@ import type { Account, Overview } from '../../lib/types'
 import { Empty, Loaded } from '../../components/Feedback'
 import { Panel, Stat } from '../../components/Panel'
 import { AccountButtons } from './AccountButtons'
+import { CheckinCard } from './CheckinCard'
 import { AccountCard } from './AccountCard'
 import { AccountName, CreditsCell, StatusCell, UsageChips } from './AccountCells'
 import { AccountDrawer } from './AccountDrawer'
@@ -117,6 +118,8 @@ function Accounts({ data, fetchedAt }: { data: Overview; fetchedAt: number }) {
         <Stat label="积分剩余 / 总额" value={creditSum} sub={pool.unlimited ? `另有 ${pool.unlimited} 个企业版不限量` : undefined} />
         <Stat label="粘性会话" value={data.sticky_sessions} />
       </div>
+
+      <CheckinCard accounts={accounts} />
 
       <ExpiryReminder accounts={accounts} />
 
