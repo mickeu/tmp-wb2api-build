@@ -181,10 +181,9 @@ const KINDS: { id: UsageKind; label: string; key: 'by_account' | 'by_model' | 'b
   { id: 'account', label: '按账号', key: 'by_account' },
   { id: 'model', label: '按模型', key: 'by_model' },
   { id: 'realm', label: '按域', key: 'by_realm' },
-  { id: 'key', label: '按密钥', key: 'by_key' },
 ]
 
-/** 按账号 / 模型 / 域 / 密钥四个维度共用一块，页内切换（零请求） */
+/** 按账号 / 模型 / 域三个维度共用一块，页内切换（零请求）。密钥维度已移除。 */
 function UsageBreakdown({ data }: { data: UsageResp }) {
   const [kind, setKind] = useState<UsageKind>('account')
   const rows = data[KINDS.find((k) => k.id === kind)!.key] || []
