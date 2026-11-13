@@ -9,7 +9,7 @@
 import { useMemo, useState } from 'react'
 import { Chip, Label, ListBox, SearchField, Select, Table, useMediaQuery } from '@heroui/react'
 import { dayClock, fmtMs, fmtTok } from '../../lib/format'
-import { useRequestMetrics } from '../../lib/queries'
+import { useAccountNames, useRequestMetrics } from '../../lib/queries'
 import {
   OUTCOME_LABEL, cacheRateText, matchRequest, outcomeLevel, requestCredit, requestLogText, requestTokens,
 } from '../../lib/requests'
@@ -61,6 +61,7 @@ function Tokens({ e }: { e: RequestEvent }) {
 const dash = <span className="text-muted">—</span>
 
 export function RequestMetrics() {
+  const names = useAccountNames()
   const [range, setRange] = useState(() => initialRange('0')) // 默认全部历史：打开页面就是「最近 N 条」
   const [limit, setLimit] = useState(100)
   const [q, setQ] = useState('')
@@ -70,7 +71,7 @@ export function RequestMetrics() {
   const d = query.data
   const m = d?.metrics ?? null
   const all = useMemo(() => d?.recent ?? [], [d])
-  const shown = useMemo(() => all.filter((e) => matchRequest(e, { q, outcome })), [all, q, outcome])
+  const shown = useMemo(() => all.filter((e) => matchRequest(e, { q, outcome }, e.account && names.label(e.account))), [all, q, outcome, names])
   // 归档里早于「调用来源」功能的条目没有来源字段：提示一句，免得以为筛选坏了
   const hasSource = all.some((e) => e.client_ip || e.user_agent)
   const count = !all.length ? '' : (shown.length !== all.length ? `命中 ${shown.length} / ${all.length} 条` : `${all.length} 条`) + (hasSource ? '' : ' · 来源未记录')
@@ -91,10 +92,10 @@ export function RequestMetrics() {
       contentClassName="flex flex-col gap-3"
     >
       <div className="flex flex-wrap items-center gap-3">
-        <SearchField aria-label="搜索请求记录" value={q} onChange={setQ} className="w-full sm:w-72">
+        <SearchField aria-label="搜索请求记录" value={q} onChange={setQ} className="w-full sm:w-md">
           <SearchField.Group>
             <SearchField.SearchIcon />
-            <SearchField.Input placeholder="搜索模型、账号、密钥、原因、IP、UA、请求 ID" />
+            <SearchField.Input placeholder="搜索模型、账号、代理、密钥、原因、IP、UA、请求 ID" />
             <SearchField.ClearButton />
           </SearchField.Group>
         </SearchField>
@@ -153,7 +154,10 @@ export function RequestMetrics() {
                         {e.error ? <Hint tip={e.error} className="block max-w-64 truncate text-xs text-danger">{e.error}</Hint> : dash}
                       </Table.Cell>
                       <Table.Cell className="whitespace-nowrap font-mono">{e.model || '—'}</Table.Cell>
-                      <Table.Cell className="whitespace-nowrap">{e.account || '—'}</Table.Cell>
+                      <Table.Cell className="whitespace-nowrap">
+                        {e.account ? names.label(e.account) : '—'}
+                        {e.proxy && <div className="text-xs text-muted">代理 {e.proxy}</div>}
+                      </Table.Cell>
                       <Table.Cell className="whitespace-nowrap">{e.api_key || dash}</Table.Cell>
                       <Table.Cell className="whitespace-nowrap font-mono text-xs">{e.client_ip || dash}</Table.Cell>
                       <Table.Cell>
@@ -180,7 +184,8 @@ export function RequestMetrics() {
                 {e.error && <p className="wrap-anywhere text-xs text-danger">{e.error}</p>}
                 <div className="flex flex-wrap gap-x-3 gap-y-0.5">
                   <span className="font-mono">{e.model || '—'}</span>
-                  <span className="text-muted">{e.account || '—'}</span>
+                  <span className="text-muted">{e.account ? names.label(e.account) : '—'}</span>
+                  {e.proxy && <span className="text-muted">代理 {e.proxy}</span>}
                   {e.api_key && <span className="text-muted">密钥 {e.api_key}</span>}
                 </div>
                 <div className="flex flex-wrap gap-x-3 text-xs text-muted tabular-nums">

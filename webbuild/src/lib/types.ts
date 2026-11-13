@@ -42,6 +42,8 @@ export interface RateLimitedModel {
 export interface Account {
   uid: string
   nickname?: string
+  /** 面板里写的备注（只在面板上显示），各页的账号名优先用它，见 accounts.ts 的 accountName */
+  note?: string
   credits: number | null
   credits_total?: number
   credits_expiring?: number
@@ -74,6 +76,70 @@ export interface Account {
   in_flight: number
   breaker_fails: number
   breaker_until?: string
+  /** 上次测活（internal/pool/liveness.go 的 LivenessResult）；从没测过时没有 */
+  last_liveness?: LivenessResult
+  /** 这个号不接的模型（上游回 11158 自动加的、手动加的），选号时跳过；没有时没有这个字段 */
+  blocked_models?: BlockedModel[]
+  /** 号所在的账号分组（Group 的 id）；没分组时没有这个字段 */
+  groups?: string[]
+  /** 优先级，0～99，越小越先用（默认 0）；选号只在最小的那一层里挑，那层都接不了才轮到下一层 */
+  priority?: number
+  /**
+   * 代理池拦着这个号的原因（号的代理不通或到期、在等代理、开着「只许走号的代理」却没绑），拦着的号不接请求、
+   * 不跑定时任务；没拦时没有。分类见 accounts.ts 的 blockedLabel
+   */
+  proxy_blocked?: string
+}
+
+/** 账号分组（internal/pool/groups.go、internal/panel/groups.go）。客户端密钥可以限定只用哪些组的号 */
+export interface Group {
+  id: string
+  name: string
+  note?: string
+  created_at: string
+  /** 组里几个号 */
+  accounts: number
+  /** 限定了这个分组的密钥名字 */
+  keys: string[]
+}
+
+export interface GroupsResp {
+  groups: Group[]
+}
+
+/** 号不接的一个模型（internal/pool/blockedmodels.go） */
+export interface BlockedModel {
+  /** 模型名，手动加的可以带 * 通配 */
+  model: string
+  /** 上游拒绝后自动加的（reason 是上游的原因，如 11158）；手动加的没有这两项 */
+  auto?: boolean
+  reason?: string
+  at: string
+}
+
+/** 一次测活的结果：给这个号发一条最短的真实对话，看它现在能不能用 */
+export interface LivenessResult {
+  at: string
+  ok: boolean
+  /** 测的模型（不带域前缀） */
+  model?: string
+  /** 测活请求最后回的 HTTP 状态码 */
+  status?: number
+  /** 失败原因（同请求记录，最多 200 字） */
+  error?: string
+  ttfb_ms?: number
+  duration_ms?: number
+  credit?: number
+  /** 定时测活发起的；面板上点的没有这个字段 */
+  scheduled?: boolean
+  /** 测通后解除了冷却、熔断或网关自动加的禁用 */
+  recovered?: boolean
+}
+
+/** 单号测活接口的返回：结果和上游回复的文字 */
+export interface LivenessResp {
+  result: LivenessResult
+  reply: string
 }
 
 export interface Overview {
@@ -88,10 +154,14 @@ export interface Overview {
   disabled: number
   /** 暂停选号（不含已禁用的） */
   paused: number
+  /** 被代理池拦着的号（不含已禁用、暂停选号的；不算进 cooling） */
+  proxy_blocked?: number
   in_flight_full: number
   accounts: Account[] | null
   /** 模型锁池：有未过期模型级限流的「域 + 模型」，已按 locked → starved → partial 排好序；无锁时为 null */
   model_locks?: ModelLockRow[] | null
+  /** 代理池概况（总览的提醒、账号池卡片上的代理）；没装代理池时为 null */
+  proxies?: ProxyOverview | null
 }
 
 /**
@@ -244,11 +314,15 @@ export interface CreditPackage {
   sub_product_code?: string
   sub_product_name?: string
   cycle?: boolean
+  /** 按周期刷新的包（订阅、体验类）：end_time 是刷新时刻 */
+  refresh?: boolean
 }
 
 export interface PackageAccount {
   uid: string
   nickname: string
+  /** 面板从总览补上的备注（接口不带），显示名用 accountName */
+  note?: string
   realm: string
   remain: number
   size: number
@@ -377,6 +451,12 @@ export interface LoginPoll {
   realm?: string
   credits?: number
   credits_total?: number
+  /** 签到、国际版激活领试用的结果说明；号被代理拦着时是「先不签到：…」 */
+  checkin_message?: string
+  /** 号的代理情况（没装代理池或没绑时各字段都空） */
+  proxy?: ProxyAccount
+  /** 号原来就在号池里，沿用了原来的代理绑定 */
+  proxy_kept?: boolean
 }
 
 export interface ImportResp {
@@ -384,6 +464,8 @@ export interface ImportResp {
   imported: number
   skipped: number
   errors: string[] | null
+  /** 导入成功但要留意的号（被代理拦着、先不签到） */
+  notes?: string[] | null
 }
 
 /** 一次请求的元数据（不含提示词、响应正文与凭证） */
@@ -415,6 +497,8 @@ export interface RequestEvent {
   api_key?: string
   /** 失败原因：回给客户端的错误消息（流中途出错时是上游的错误帧），最多 200 字；成功的请求没有 */
   error?: string
+  /** 最后选的号走的代理（名字）；号没绑代理时没有 */
+  proxy?: string
 }
 
 export interface RequestMetrics {
@@ -431,7 +515,7 @@ export interface RequestMetrics {
   archive?: ArchiveStats
 }
 
-/** 一类日志归档的存储状态（请求记录、任务日志、系统日志） */
+/** 一类日志归档的存储状态（请求记录、任务日志、系统日志、积分获取） */
 export interface ArchiveStats {
   enabled: boolean
   dir?: string
@@ -462,6 +546,7 @@ export interface LogStorage {
   task: ArchiveStats | null
   system: ArchiveStats | null
   usage: UsageStoreStats | null
+  credit: ArchiveStats | null
 }
 
 /** /panel/api/logs/archive：按时间范围查到的运行日志，按时间先后排；more = 更早的还有没返回的 */
@@ -469,6 +554,46 @@ export interface LogArchiveResp {
   entries: LogEntry[] | null
   limit: number
   more: boolean
+}
+
+/** 积分从哪来：签到、成长任务领奖、积分补偿、猫猫旅行、新手礼包、连登兑换 */
+export type EarnSource = 'checkin' | 'task' | 'compensation' | 'travel' | 'gift' | 'redeem'
+
+/** 领到的一笔积分 */
+export interface CreditEarning {
+  /** RFC3339 */
+  t: string
+  uid: string
+  nickname?: string
+  realm?: string
+  /** EarnSource 之一；更新的网关可能多出新的来源 */
+  source: string
+  /** 领奖是任务码，连登兑换是档位（7d / 14d / 28d） */
+  detail?: string
+  credit: number
+}
+
+/** 一个来源或一个账号的合计；按账号的带这个号最新一笔记下的昵称和域 */
+export interface CreditSum {
+  key: string
+  nickname?: string
+  realm?: string
+  credit: number
+  count: number
+}
+
+/**
+ * /panel/api/credit_log：区间内符合条件的最新 limit 笔（新的在前），more = 更早的还有没返回的；
+ * total、count 和两种合计算的是区间内符合条件的全部，不受 limit 限制
+ */
+export interface CreditLogResp {
+  entries: CreditEarning[]
+  limit: number
+  more: boolean
+  total: number
+  count: number
+  by_source: CreditSum[]
+  by_account: CreditSum[]
 }
 
 export interface CompensationStatus {
@@ -573,6 +698,8 @@ export interface ApiKey {
   total_limit: KeyLimits
   /** 模型白名单（* 通配，按实际发上游的模型名匹配），空 = 不限 */
   models?: string[] | null
+  /** 只用这些账号分组里的号（Group 的 id），空 = 不限 */
+  groups?: string[] | null
   last_used_at?: string
   used: KeyUsage
   /** 北京时间今天的用量 */
@@ -598,4 +725,199 @@ export interface KeyInput {
   daily_limit: KeyLimits
   total_limit: KeyLimits
   models: string[]
+  groups: string[]
+}
+
+// ---------------------------------------------------------------------------
+// 代理池（internal/proxies，规则见 docs/proxy.md）。代理地址都是打码的（密码换成 ***）
+// ---------------------------------------------------------------------------
+
+export interface ProxySettings {
+  /** 只许走号的代理：没绑代理的号不接请求、不跑定时任务 */
+  require_bound: boolean
+  /** 健康检查间隔（分钟，只测连通） */
+  health_minutes: number
+  /** 查出口 IP 的间隔（分钟） */
+  exit_minutes: number
+  /** 代理连续不可用多久后把号改绑（分钟） */
+  rebind_minutes: number
+  /** 到期前几天开始提醒 */
+  expiry_warn_days: number
+  /** 查出口 IP 的地址，按顺序试；空用内置的 */
+  exit_ip_urls?: string[]
+}
+
+/** 出口 IP 和地区 */
+export interface ProxyExit {
+  ip?: string
+  country?: string
+  region?: string
+  city?: string
+  isp?: string
+  /** 这次是从哪个地址查到的 */
+  source?: string
+  checked_at: string
+  /** 这次没查到的原因；IP 等字段保留上次查到的 */
+  error?: string
+}
+
+export interface ProxyHealth {
+  /** 连通：没有 = 还没测，ok 通，down 不通 */
+  state?: 'ok' | 'down'
+  checked_at?: string
+  latency_ms?: number
+  error?: string
+  /** 这次不通从什么时候开始 */
+  down_since?: string
+  exit?: ProxyExit
+  /** 出口 IP 上一次变化 */
+  prev_exit_ip?: string
+  exit_changed_at?: string
+}
+
+/** 代理池（号的分组）和它的统计 */
+export interface ProxyPool {
+  id: string
+  name: string
+  /** 每个代理最多绑几个号，0 = 不限 */
+  max_per_proxy: number
+  /** 这个池是哪个域新号的默认池（cn / global） */
+  default_for?: string[]
+  proxies: number
+  usable: number
+  accounts: number
+  /** 绑着这个池、在等代理的号 */
+  waiting: number
+}
+
+export interface ProxyItem {
+  id: string
+  name: string
+  /** 打码后的地址 */
+  url: string
+  scheme: string
+  host: string
+  /** 池 ID */
+  pool: string
+  expires_at?: string
+  created_at: string
+  health: ProxyHealth
+  /** 绑在上面的号（uid） */
+  accounts: string[]
+  /** 绑满了 / 超过上限（调低上限以后） */
+  full?: boolean
+  over?: boolean
+  /** 能用（没到期、没测出不通） */
+  usable: boolean
+  expired?: boolean
+  /** 快到期（expiry_warn_days 以内） */
+  expiring?: boolean
+  /** 出口 IP 一样的别的代理（名字） */
+  dup_exit?: string[]
+  /** 出口 IP 和没绑代理的号一样（代理可能没起作用） */
+  same_as_default?: boolean
+  /** 出口 IP 最近 24 小时变过 */
+  exit_changed?: boolean
+}
+
+export interface ProxyWarnings {
+  down: number
+  expired: number
+  expiring: number
+  /** 在等代理的号 */
+  waiting: number
+  /** 被代理池拦着的号 */
+  blocked: number
+}
+
+/** 一个号的代理情况（没绑也没被拦的号没有这一项） */
+export interface ProxyAccount {
+  pool?: string
+  pool_name?: string
+  proxy?: string
+  proxy_name?: string
+  /** 单独指定的代理（不随池内均分改动） */
+  manual?: boolean
+  exit_ip?: string
+  exit_geo?: string
+  /** 在等代理 */
+  waiting?: boolean
+  /** 现在不能出站的原因 */
+  blocked?: string
+}
+
+export interface ProxiesView {
+  settings: ProxySettings
+  pools: ProxyPool[]
+  proxies: ProxyItem[]
+  /** 没绑代理的号的出口（服务器自己的 IP 或环境变量里的代理） */
+  default_exit?: ProxyExit
+  warnings: ProxyWarnings
+}
+
+/** GET proxies：代理页的数据 + 每个号的代理情况 */
+export interface ProxiesResp {
+  view: ProxiesView
+  accounts: Record<string, ProxyAccount>
+}
+
+/** 总览里的代理池部分 */
+export interface ProxyOverview {
+  pools: number
+  proxies: number
+  require_bound: boolean
+  warnings: ProxyWarnings
+  accounts: Record<string, ProxyAccount>
+}
+
+/** 批量导入的一行 */
+export interface ProxyLine {
+  /** 第几行（从 1 数） */
+  no: number
+  /** 原文（密码已打码） */
+  text: string
+  name?: string
+  /** 打码后的地址 */
+  url?: string
+  /** 认不出来的原因 */
+  error?: string
+  /** 和谁重复：existing 和已有的代理，batch 和这批前面的行 */
+  duplicate?: 'existing' | 'batch'
+  /** 那个代理的名字或那一行的行号 */
+  duplicate_of?: string
+}
+
+export interface ProxyImportResp {
+  lines: ProxyLine[] | null
+  /** 新加的代理 ID */
+  added: string[] | null
+}
+
+/** 批量绑定一个号的结果 */
+export interface ProxyBindResult {
+  uid: string
+  proxy?: string
+  proxy_name?: string
+  /** 池里没有空位，在等代理 */
+  waiting?: boolean
+  error?: string
+}
+
+/** 新建、修改池 */
+export interface ProxyPoolInput {
+  name: string
+  max_per_proxy: number
+  default_cn: boolean
+  default_global: boolean
+  /** 设默认池时把这个域现有没绑代理的号也放进来 */
+  adopt_unbound: boolean
+}
+
+/** 修改代理：url 不变（还是打码的）就不改；clear_expiry 去掉到期日 */
+export interface ProxyInput {
+  name: string
+  url: string
+  pool: string
+  expires_at: string | null
+  clear_expiry: boolean
 }

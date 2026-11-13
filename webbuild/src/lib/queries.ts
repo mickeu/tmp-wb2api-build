@@ -4,14 +4,17 @@
 
 // 所有读接口的查询（TanStack Query）。打上游的接口（模型、积分包、任务、券码、补偿）不随窗口聚焦自动重查，
 // 只读网关内存的接口（总览、日志、队列、版本）按页面需要轮询；标签页切到后台时轮询自动暂停。
+import { useMemo } from 'react'
 import { QueryClient, keepPreviousData, useQuery } from '@tanstack/react-query'
+import { accountName, namesOf, relabel } from './accounts'
 import { ApiError, acct, api, errorMessage } from './api'
+import { creditLogQuery } from './credits'
 import { logArchiveQuery, type LevelFilter, type LogChannel } from './logs'
 import { rangeKey, rangeQuery, type TimeRange } from './timerange'
 import { SEEN_VERSION_KEY, readStored, updateBusy } from './update'
 import type {
-  CompensationResp, ConfigResp, KeysResp, LogArchiveResp, LogEntry, LogStorage, Model, Overview, PackageAccount, ProbesResp, QueueState, RequestEvent,
-  RequestMetrics, Task, UsageResp, VersionResp, VoucherAccount,
+  CompensationResp, ConfigResp, CreditLogResp, GroupsResp, KeysResp, LogArchiveResp, LogEntry, LogStorage, Model, Overview, PackageAccount, ProbesResp, ProxiesResp, QueueState,
+  RequestEvent, RequestMetrics, Task, UsageResp, VersionResp, VoucherAccount,
 } from './types'
 
 export const queryClient = new QueryClient({
@@ -30,11 +33,16 @@ export const qk = {
   /** 按时间范围查的历史运行日志；清空留存后按前缀 ['logs_archive'] 一起作废 */
   logArchive: (range: TimeRange, ch: string, level: string, q: string, limit: number) => ['logs_archive', rangeKey(range), ch, level, q, limit] as const,
   logStorage: ['log_storage'] as const,
+  /** 积分获取流水；清空留存后按前缀 ['credit_log'] 一起作废 */
+  creditLog: (range: TimeRange, uid: string, source: string, limit: number) => ['credit_log', rangeKey(range), uid, source, limit] as const,
   requests: (range: TimeRange, limit: number) => ['request_metrics', rangeKey(range), limit] as const,
+  recentRequests: ['request_metrics', 'recent'] as const,
   models: ['models'] as const,
   probes: ['model_probes'] as const,
   usage: (range: TimeRange, key: string) => ['usage', rangeKey(range), key] as const,
   keys: ['keys'] as const,
+  groups: ['groups'] as const,
+  proxies: ['proxies'] as const,
   packages: ['packages'] as const,
   config: ['config'] as const,
   tasks: (uid: string) => ['tasks', uid] as const,
@@ -53,6 +61,23 @@ export function useOverview(intervalMs = 30_000) {
   })
 }
 
+const NO_NAMES: ReturnType<typeof namesOf> = { notes: new Map(), nicks: new Map() }
+
+/**
+ * 账号显示名（备注 > 昵称 > UID 前 8 位），给只带 uid 和昵称的接口数据（用量、积分、任务、补偿、请求记录…）
+ * 补上备注；没给昵称的（代理绑了哪些号只有 uid）用总览里的昵称。备注、昵称取自外壳一直在轮询的总览缓存，
+ * 这个钩子自己不发请求。
+ */
+export function useAccountNames() {
+  const { data: names = NO_NAMES } = useQuery({ queryKey: qk.overview, queryFn: () => api<Overview>('overview'), enabled: false, select: namesOf })
+  return useMemo(() => ({
+    note: (uid: string) => names.notes.get(uid),
+    name: (uid: string, nickname?: string) => accountName({ uid, nickname: nickname || names.nicks.get(uid), note: names.notes.get(uid) }),
+    /** 请求记录里的「昵称(uid8)」标签 */
+    label: (label: string) => relabel(label, names.notes),
+  }), [names])
+}
+
 export function useLogs(live: boolean) {
   return useQuery({
     queryKey: qk.logs,
@@ -69,6 +94,15 @@ export function useLogArchive(range: TimeRange, ch: LogChannel, level: LevelFilt
   return useQuery({
     queryKey: qk.logArchive(range, ch, level, q, limit),
     queryFn: () => api<LogArchiveResp>('logs/archive?' + logArchiveQuery(range, ch, level, q, limit).toString()),
+    placeholderData: keepPreviousData,
+  })
+}
+
+/** 积分获取流水：留存是磁盘上的文件，不轮询，换条件或点「重新读取」才查；换条件时先留着上一次的结果 */
+export function useCreditLog(range: TimeRange, uid: string, source: string, limit: number) {
+  return useQuery({
+    queryKey: qk.creditLog(range, uid, source, limit),
+    queryFn: () => api<CreditLogResp>('credit_log?' + creditLogQuery(range, uid, source, limit).toString()),
     placeholderData: keepPreviousData,
   })
 }
@@ -109,6 +143,15 @@ export function useRequestMetrics(live: boolean, range: TimeRange, limit: number
     },
     refetchInterval: live ? 5000 : false,
     placeholderData: keepPreviousData,
+  })
+}
+
+/** 网关内存里的最近请求（最近 100 条，不查归档）：模型页「状态」列用，30 秒一刷 */
+export function useRecentRequests() {
+  return useQuery({
+    queryKey: qk.recentRequests,
+    queryFn: () => api<RequestMetrics>('request_metrics').then((m) => m.recent || []),
+    refetchInterval: 30_000,
   })
 }
 
@@ -156,6 +199,31 @@ export function useKeys(intervalMs: number | false = false) {
     queryKey: qk.keys,
     queryFn: () => api<KeysResp>('keys'),
     refetchInterval: intervalMs,
+  })
+}
+
+/** 账号分组（带号数和限定了它的密钥）：账号池、密钥编辑器用；增删改、号进出分组后作废重查 */
+export function useGroups() {
+  return useQuery({
+    queryKey: qk.groups,
+    queryFn: () => api<GroupsResp>('groups'),
+    select: (d) => d.groups,
+  })
+}
+
+/**
+ * 代理池（只读网关内存）：代理页 5 秒一刷（健康检查、出口 IP 在后台变）；绑定、登录选池的弹窗打开时查一次。
+ * 没装代理池（501）时返回 null，弹窗里就不显示选池。
+ */
+export function useProxies(intervalMs: number | false = false, enabled = true) {
+  return useQuery({
+    queryKey: qk.proxies,
+    queryFn: () => api<ProxiesResp>('proxies').catch((e: unknown) => {
+      if (e instanceof ApiError && e.status === 501) return null
+      throw e
+    }),
+    refetchInterval: intervalMs,
+    enabled,
   })
 }
 

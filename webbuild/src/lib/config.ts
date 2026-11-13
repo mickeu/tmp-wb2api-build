@@ -85,6 +85,14 @@ export const CONFIG_TABS: ConfigTab[] = [
         ],
       },
       {
+        title: '定时测活',
+        fields: [
+          toggle('liveness_enabled', ['schedule', 'liveness_enabled'], '定时测活',
+            '每隔一段时间给整个号在限流冷却、熔断中的号发一条最短的真实对话，测通就提前恢复；余额不足、风控、已禁用、暂停选号的号不测，健康的号也不测'),
+          num('liveness_minutes', ['schedule', 'liveness_minutes'], '测活间隔（分钟）', '30', { min: 1 }),
+        ],
+      },
+      {
         title: '成长任务自动执行',
         fields: [
           toggle('growth_enabled', ['schedule', 'growth_enabled'], '成长任务自动执行'),
@@ -109,7 +117,10 @@ export const CONFIG_TABS: ConfigTab[] = [
         fields: [
           num('max_in_flight', ['pool', 'max_in_flight'], '单账号最大在途', '3', { min: 0, hint: '0 = 不限制' }),
           num('max_in_flight_global', ['pool', 'max_in_flight_global'], '国际版在途上限', '2', { min: 1, hint: 'global 域风控更紧，默认 2' }),
-          duration('in_flight_wait', ['pool', 'in_flight_wait'], '号都满时排队上限', '30s', '能接的号在途都满时，请求最多等多久空位；0 = 不等，直接 503'),
+          num('max_rpm', ['pool', 'max_rpm'], '国内版每号每分钟请求数', '0',
+            { min: 0, hint: '最近 60 秒内一个号最多接几个请求，到了就换别的号或排队，同在途满；0 = 不限制' }),
+          num('max_rpm_global', ['pool', 'max_rpm_global'], '国际版每号每分钟请求数', '0', { min: 0, hint: '同上，只管国际版的号；0 = 不限制' }),
+          duration('in_flight_wait', ['pool', 'in_flight_wait'], '号都满时排队上限', '30s', '能接的号在途都满或每分钟请求数到上限时，请求最多等多久空位；0 = 不等，直接 503'),
           num('breaker_threshold', ['pool', 'breaker_threshold'], '连续失败熔断阈值', '3', { min: 1 }),
           duration('breaker_cooldown', ['pool', 'breaker_cooldown'], '熔断基础时长', '30m'),
           duration('breaker_cooldown_max', ['pool', 'breaker_cooldown_max'], '熔断退避上限', '6h'),
@@ -132,8 +143,15 @@ export const CONFIG_TABS: ConfigTab[] = [
       {
         title: '选号权重',
         fields: [
-          toggle('cross_realm', ['pool', 'cross_realm'], '跨域负载均衡',
-            '不带 cn: / global: 前缀的模型名在国内版 + 国际版合池选号（只进模型目录里有它的域）；带前缀的照旧钉死一域。需启用国际版'),
+          {
+            name: 'cross_realm', path: ['pool', 'cross_realm'], label: '跨域负载均衡', kind: 'select',
+            hint: '打开后 /v1/models 会多列出不带 cn: / global: 前缀的模型名，用这种名字请求时，网关自动在国内版、国际版账号里选号。带前缀的名字照旧只走那一域。需启用国际版',
+            options: [
+              { id: 'off', label: 'off — 关闭：不带前缀的模型名只用国内版账号' },
+              { id: 'merge', label: 'merge — 合池：国内版、国际版账号一起选' },
+              { id: 'cn_first', label: 'cn_first — 国内版优先：国内版没号可用时才用国际版账号' },
+            ],
+          },
           num('idle_weight_per_hour', ['pool', 'idle_weight_per_hour'], '闲置补偿 / 小时', '0.5', { step: 0.1 }),
           num('idle_weight_max', ['pool', 'idle_weight_max'], '闲置补偿上限', '5', { step: 0.1 }),
           duration('cost_explore_interval', ['pool', 'cost_explore_interval'], '成本探索窗口', '30m', '垄断破除：免费层垄断时定期搭车探索未知号；0 关停'),
@@ -213,6 +231,12 @@ export const CONFIG_TABS: ConfigTab[] = [
           num('usage_retention_days', ['logging', 'usage_retention_days'], '保留天数', '0',
             { min: 0, hint: '0 = 永久保留；超期的整点、整天用量明细自动删除，用量页能查到的最早时间随之后移' }),
         ],
+      },
+      {
+        title: '积分获取',
+        store: 'credit',
+        fields: archive('credit_log', '留存积分获取',
+          '签到、领奖、积分补偿、猫猫旅行、新手礼包、连登兑换领到的积分逐笔落盘，积分获取页可按时间范围查', '0', '20'),
       },
     ],
   },

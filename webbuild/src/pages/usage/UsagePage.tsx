@@ -10,7 +10,7 @@ import { Bar, BarChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Toolt
 import { fmtMs, fmtRate, fmtTok } from '../../lib/format'
 import type { TipProps } from '../../lib/chart'
 import { USAGE_KEY_ADMIN, USAGE_KEY_ALL, USAGE_KEY_NONE } from '../../lib/keys'
-import { useKeys, useUsage } from '../../lib/queries'
+import { useAccountNames, useKeys, useUsage } from '../../lib/queries'
 import { initialRange, rangeLabel } from '../../lib/timerange'
 import type { KeyedUsage, UsagePoint, UsageResp } from '../../lib/types'
 import { chartPoints, chartStats, dayBoundaries, minGap, nearestTicks, share, tickLabel, type ChartPoint } from '../../lib/usage'
@@ -181,9 +181,10 @@ const KINDS: { id: UsageKind; label: string; key: 'by_account' | 'by_model' | 'b
   { id: 'account', label: '按账号', key: 'by_account' },
   { id: 'model', label: '按模型', key: 'by_model' },
   { id: 'realm', label: '按域', key: 'by_realm' },
+  { id: 'key', label: '按密钥', key: 'by_key' },
 ]
 
-/** 按账号 / 模型 / 域三个维度共用一块，页内切换（零请求）。密钥维度已移除。 */
+/** 按账号 / 模型 / 域 / 密钥四个维度共用一块，页内切换（零请求） */
 function UsageBreakdown({ data }: { data: UsageResp }) {
   const [kind, setKind] = useState<UsageKind>('account')
   const rows = data[KINDS.find((k) => k.id === kind)!.key] || []
@@ -234,6 +235,7 @@ const NUM_COLS: { id: NumKey; label: string; fmt: (r: KeyedUsage) => ReactNode; 
  * UID / 密钥 id 做副标题
  */
 function UsageTable({ kind, rows }: { kind: UsageKind; rows: KeyedUsage[] }) {
+  const names = useAccountNames()
   const [sort, setSort] = useState<SortDescriptor>({ column: 'total_tokens', direction: 'descending' })
   const cols = NUM_COLS.filter((c) => !c.perf || kind === 'account')
   const sorted = useMemo(() => {
@@ -262,8 +264,8 @@ function UsageTable({ kind, rows }: { kind: UsageKind; rows: KeyedUsage[] }) {
                 <Table.Cell>
                   {kind === 'account' ? (
                     <div className="flex flex-col">
-                      <span className="font-medium">{r.extra || r.key.slice(0, 8)}</span>
-                      {r.extra && <span className="font-mono text-xs text-muted">{r.key.slice(0, 8)}</span>}
+                      <span className="font-medium">{names.name(r.key, r.extra)}</span>
+                      {names.name(r.key, r.extra) !== r.key.slice(0, 8) && <span className="font-mono text-xs text-muted">{r.key.slice(0, 8)}</span>}
                     </div>
                   ) : kind === 'key' ? (
                     <div className="flex flex-col">

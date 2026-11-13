@@ -45,23 +45,23 @@ describe('表单与提交', () => {
   it('从密钥回填再提交，往返不丢字段', () => {
     const k = key({
       note: '朋友', expires_at: '2026-11-01T00:00:00Z', daily_limit: { credits: 10 }, total_limit: { requests: 100, tokens: 5000 },
-      models: ['glm-*'],
+      models: ['glm-*'], groups: ['g1'],
     })
     const f = keyFormFrom(k)
     expect(f.daily).toEqual({ requests: null, tokens: null, credits: 10 })
     expect(keyInput(f)).toEqual({
       name: '张三', note: '朋友', enabled: true, expires_at: '2026-11-01T00:00:00.000Z',
-      daily_limit: { credits: 10 }, total_limit: { requests: 100, tokens: 5000 }, models: ['glm-*'],
+      daily_limit: { credits: 10 }, total_limit: { requests: 100, tokens: 5000 }, models: ['glm-*'], groups: ['g1'],
     })
   })
   it('没有到期时间、零值上限、零值时间', () => {
-    const f = keyFormFrom(key({ expires_at: '0001-01-01T00:00:00Z', models: null }))
+    const f = keyFormFrom(key({ expires_at: '0001-01-01T00:00:00Z', models: null, groups: null }))
     expect(f.expires).toBeNull()
     f.daily.requests = 0
     f.total.tokens = 12.7
     f.total.credits = Number.NaN
     f.name = '  李四 '
-    expect(keyInput(f)).toMatchObject({ name: '李四', expires_at: null, daily_limit: {}, total_limit: { tokens: 12 }, models: [] })
+    expect(keyInput(f)).toMatchObject({ name: '李四', expires_at: null, daily_limit: {}, total_limit: { tokens: 12 }, models: [], groups: [] })
   })
   it('校验', () => {
     const f = emptyKeyForm()
@@ -89,6 +89,7 @@ describe('模型白名单', () => {
     expect(addModelPattern(['glm-*'], 'kimi-k2')).toEqual(['glm-*', 'kimi-k2'])
     expect(addModelPattern([], 'cn:glm-5.2')).toMatch(/不带 cn: \/ global: 前缀/)
     expect(addModelPattern([], 'x'.repeat(129))).toMatch(/最长 128/)
+    expect(addModelPattern([], 'glm 5')).toMatch(/不能有空格/)
   })
   it('目录候选与放行范围', () => {
     const bare = bareModelIds(['cn:glm-5.2', 'glm-5.2', 'global:gpt-5.5', 'deepseek-v4.1-flash'])

@@ -2,27 +2,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/yreidev/workbuddy2api-panel
 
-// 单个账号的运维动作（签到 / 刷新余额 / 查看任务 / 解冻 / 暂停与恢复选号 / 禁用 / 移除），账号表、手机卡片、详情抽屉共用。
+// 单个账号的运维动作（签到 / 刷新余额 / 查看任务 / 测活 / 解冻 / 暂停与恢复选号 / 禁用 / 移除），账号表、手机卡片、详情抽屉共用。
 import { useState } from 'react'
 import { toast } from '@heroui/react'
 import { useQueryClient } from '@tanstack/react-query'
-import { creditsText } from '../../lib/accounts'
+import { accountName, creditsText } from '../../lib/accounts'
 import { acct, post } from '../../lib/api'
 import { toastError } from '../../lib/hooks'
 import { qk } from '../../lib/queries'
 import type { Account } from '../../lib/types'
 import { useConfirm } from '../../components/useConfirm'
 
-export type AccountAction = 'checkin' | 'balance' | 'tasks' | 'revive' | 'pause' | 'resume' | 'disable' | 'remove'
+export type AccountAction = 'checkin' | 'balance' | 'tasks' | 'liveness' | 'revive' | 'pause' | 'resume' | 'disable' | 'remove'
 
 interface CheckinResp { credits?: number; credits_total?: number; checkin_message?: string; balance_error?: string }
 
-export function useAccountActions(openTasks: (uid: string) => void) {
+/** openTasks、openLiveness 打开任务弹窗、测活弹窗（两个弹窗由账号页管） */
+export function useAccountActions(openTasks: (uid: string) => void, openLiveness: (uid: string) => void) {
   const qc = useQueryClient()
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmEl, ask] = useConfirm()
 
-  const exec = async (uid: string, action: Exclude<AccountAction, 'tasks'>, enterprise = false) => {
+  const exec = async (uid: string, action: Exclude<AccountAction, 'tasks' | 'liveness'>, enterprise = false) => {
     setBusy(uid + ':' + action)
     try {
       if (action === 'checkin') {
@@ -58,9 +59,10 @@ export function useAccountActions(openTasks: (uid: string) => void) {
 
   const run = (a: Account, action: AccountAction) => {
     if (action === 'tasks') return openTasks(a.uid)
+    if (action === 'liveness') return openLiveness(a.uid)
     if (action === 'remove') {
       return ask({
-        title: '移除账号「' + (a.nickname || a.uid.slice(0, 12)) + '」？',
+        title: '移除账号「' + accountName(a) + '」？',
         body: '移除账号将删除池状态与 auths/ 下的凭证文件，且不可恢复。',
         confirmLabel: '移除',
         onConfirm: () => void exec(a.uid, 'remove'),
@@ -68,7 +70,7 @@ export function useAccountActions(openTasks: (uid: string) => void) {
     }
     if (action === 'disable') {
       return ask({
-        title: '禁用账号「' + (a.nickname || a.uid.slice(0, 12)) + '」？',
+        title: '禁用账号「' + accountName(a) + '」？',
         body: '禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。',
         confirmLabel: '禁用',
         onConfirm: () => void exec(a.uid, 'disable'),

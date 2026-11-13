@@ -10,7 +10,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { post } from '../../lib/api'
 import { timeMs } from '../../lib/format'
 import { toastError } from '../../lib/hooks'
-import { qk, useQueue } from '../../lib/queries'
+import { qk, useAccountNames, useQueue } from '../../lib/queries'
 import { growthTitles } from '../../lib/tasks'
 import type { QueueItem, QueueState, RunQueueResp, ScanAccount } from '../../lib/types'
 import { BusyButton, Empty } from '../../components/Feedback'
@@ -20,7 +20,8 @@ import { useConfirm } from '../../components/useConfirm'
 import { CompensationModal } from './CompensationModal'
 import { VouchersModal } from './VouchersModal'
 
-interface Row { kind: string; code: string; prog: string; status: string; message?: string }
+// claim：已达标还没领奖（扫描结果），或队列里只领奖的一项
+interface Row { kind: string; code: string; prog: string; status: string; message?: string; claim?: boolean }
 interface Group { uid: string; nick: string; rows: Row[] }
 
 // 本页会话里跟踪过的队列代次：只显示自己启动的、或打开页面时仍在执行的那一轮；
@@ -33,7 +34,7 @@ function groupsFromScan(accounts: ScanAccount[]): Group[] {
     const rows: Row[] = []
     for (const t of a.growth || []) {
       growthTitles.set(t.task_code, t.title || t.task_code)
-      rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan' })
+      rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan', claim: !!t.claimable })
     }
     if (rows.length) out.push({ uid: a.uid, nick: a.nickname, rows })
   }
@@ -44,7 +45,7 @@ function groupsFromQueue(items: QueueItem[]): Group[] {
   const by = new Map<string, Group>()
   for (const it of items) {
     if (!by.has(it.uid)) by.set(it.uid, { uid: it.uid, nick: it.nickname, rows: [] })
-    by.get(it.uid)!.rows.push({ kind: it.kind, code: it.code, prog: it.kind === 'school' ? '—' : '', status: it.status, message: it.message })
+    by.get(it.uid)!.rows.push({ kind: it.kind, code: it.code, prog: it.kind === 'school' ? '—' : '', status: it.status, message: it.message, claim: it.kind === 'claim' })
   }
   return [...by.values()]
 }
@@ -60,6 +61,7 @@ const STATUS: Record<string, { label: string; color: 'success' | 'accent' | 'dan
 
 export function TaskCenterPage() {
   const qc = useQueryClient()
+  const names = useAccountNames()
   const queue = useQueue()
   // 扫描结果放在查询缓存里：切到别的页面再回来，上次的扫描结果还在
   const scan = useQuery({
@@ -163,14 +165,14 @@ export function TaskCenterPage() {
       >
         {showQueue && q && <QueueProgress q={q} />}
         {groups === null ? (
-          <Empty title="还没有扫描过">扫描所有账号的成长任务待办，把没做的排成一列，一键执行。</Empty>
+          <Empty title="还没有扫描过">扫描所有账号的成长任务待办，把没做的和已达标没领奖的排成一列，一键执行。</Empty>
         ) : groups.length === 0 ? (
           <Empty title="没有待办任务 🎉">全部账号的成长任务都已完成，明日再来。</Empty>
         ) : (
           groups.map((g) => (
             <section key={g.uid} className="flex flex-col">
               <h3 className="flex items-baseline gap-2 pb-1 text-sm">
-                <span className="font-semibold">{g.nick || g.uid.slice(0, 12)}</span>
+                <span className="font-semibold">{names.name(g.uid, g.nick)}</span>
                 <span className="text-xs text-muted">{g.rows.length} 项</span>
               </h3>
               <ul className="flex flex-col divide-y divide-separator">
@@ -182,6 +184,7 @@ export function TaskCenterPage() {
                       <span className="flex min-w-0 items-center gap-1.5">
                         <span className="truncate">{r.kind === 'school' ? '开学季闭环' : growthTitles.get(r.code) || r.code}</span>
                         {r.kind === 'school' && <Chip size="sm" variant="soft">开学季</Chip>}
+                        {r.claim && <Chip size="sm" variant="soft" color="warning">领奖</Chip>}
                       </span>
                       <span className="hidden text-right tabular-nums text-muted sm:block">{r.prog}</span>
                       <span className="justify-self-end sm:justify-self-start"><Chip size="sm" variant="soft" color={st.color}>{st.label}</Chip></span>

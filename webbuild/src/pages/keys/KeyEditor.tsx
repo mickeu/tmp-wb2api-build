@@ -6,33 +6,21 @@
 import { useMemo, useState } from 'react'
 import { Copy } from '@gravity-ui/icons'
 import {
-  Button, Calendar, ComboBox, DateField, DatePicker, type DateValue, Description, Input, Label, ListBox, Modal, NumberField, Surface, Switch, Tag, TagGroup, TextArea, TextField, toast,
+  Button, Checkbox, CheckboxGroup, Description, Input, Label, Modal, NumberField, Surface, Switch, Tag, TagGroup, TextArea, TextField, toast,
 } from '@heroui/react'
-import { CalendarDateTime, getLocalTimeZone } from '@internationalized/date'
 import { useQueryClient } from '@tanstack/react-query'
 import { post } from '../../lib/api'
 import { copyText } from '../../lib/clipboard'
-import { toastError, useNow } from '../../lib/hooks'
+import { toastError, useLast } from '../../lib/hooks'
 import {
-  LIMIT_KINDS, addModelPattern, allowedModels, bareModelIds, emptyKeyForm, keyFormFrom, keyInput, validateKeyForm,
+  LIMIT_KINDS, allowedModels, bareModelIds, emptyKeyForm, keyFormFrom, keyInput, validateKeyForm,
   type KeyForm, type LimitForm,
 } from '../../lib/keys'
-import { qk, useModels } from '../../lib/queries'
+import { qk, useGroups, useModels } from '../../lib/queries'
 import type { ApiKey } from '../../lib/types'
+import { ExpiryField } from '../../components/ExpiryField'
 import { BusyButton } from '../../components/Feedback'
-
-const toValue = (ms: number) => {
-  const d = new Date(ms)
-  return new CalendarDateTime(d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes())
-}
-const DAY = 86_400_000
-
-/** 弹窗关闭时留住上一次的内容，退场动画里标题不会变空或变成别的 */
-function useLast<T>(v: T | null): T | null {
-  const [last, setLast] = useState<T | null>(v)
-  if (v != null && v !== last) setLast(v)
-  return v ?? last
-}
+import { ModelPatternInput } from '../../components/ModelPatternInput'
 
 export function KeyEditor({ target, onClose, onCreated }: {
   /** new = 新建；null = 关闭 */
@@ -76,6 +64,7 @@ function EditorBody({ editing, onClose, onCreated }: { editing: ApiKey | null; o
       const path = editing ? 'keys/' + encodeURIComponent(editing.id) : 'keys'
       const r = await post<{ ok: boolean; key: ApiKey }>(path, keyInput(form))
       void qc.invalidateQueries({ queryKey: qk.keys })
+      void qc.invalidateQueries({ queryKey: qk.groups })
       if (editing) {
         toast.success(`已保存「${r.key.name}」`)
         onClose()
@@ -109,7 +98,13 @@ function EditorBody({ editing, onClose, onCreated }: { editing: ApiKey | null; o
           <TextArea rows={2} placeholder="可选：给谁用、什么时候给的" />
         </TextField>
 
-        <ExpiryField value={form.expires} onChange={(expires) => set({ expires })} />
+        <ExpiryField
+          value={form.expires}
+          onChange={(expires) => set({ expires })}
+          description="不设就一直有效；到期后网关回 401 并说明已过期。"
+          pastWarning="这个时间已经过了，保存后密钥立即不能用。"
+          presets={[7, 30, 90]}
+        />
 
         <fieldset className="flex flex-col gap-3">
           <legend className="mb-1 text-sm font-medium">用量上限</legend>
@@ -119,6 +114,8 @@ function EditorBody({ editing, onClose, onCreated }: { editing: ApiKey | null; o
         </fieldset>
 
         <ModelsField value={form.models} onChange={(models) => set({ models })} />
+
+        <GroupsField value={form.groups} onChange={(groups) => set({ groups })} />
       </Modal.Body>
       <Modal.Footer>
         {error && form.name.trim() !== '' && <span className="mr-auto text-sm text-danger">{error}</span>}
@@ -126,55 +123,6 @@ function EditorBody({ editing, onClose, onCreated }: { editing: ApiKey | null; o
         <BusyButton busy={saving} isDisabled={!!error} onPress={() => void save()}>{editing ? '保存' : '创建'}</BusyButton>
       </Modal.Footer>
     </>
-  )
-}
-
-/** 到期时间：不过期 / 选一个时刻（本机时区），另给几个常用时长 */
-function ExpiryField({ value, onChange }: { value: number | null; onChange: (ms: number | null) => void }) {
-  const now = useNow(30_000)
-  const pick = (v: DateValue | null) => onChange(v ? v.toDate(getLocalTimeZone()).getTime() : null)
-  const after = (days: number) => {
-    const d = new Date(Date.now() + days * DAY)
-    d.setSeconds(0, 0)
-    onChange(d.getTime())
-  }
-  return (
-    <div className="flex flex-col gap-2">
-      <Switch isSelected={value != null} onChange={(on) => (on ? after(30) : onChange(null))}>
-        <Switch.Content>
-          <Switch.Control><Switch.Thumb /></Switch.Control>
-          设到期时间
-        </Switch.Content>
-        <Description>不设就一直有效；到期后网关回 401 并说明已过期。</Description>
-      </Switch>
-      {value != null && (
-        <div className="flex flex-wrap items-end gap-2">
-          <DatePicker aria-label="到期时间" granularity="minute" hourCycle={24} value={toValue(value)} onChange={pick} className="w-52">
-            <DateField.Group>
-              <DateField.Input>{(segment) => <DateField.Segment segment={segment} />}</DateField.Input>
-              <DateField.Suffix>
-                <DatePicker.Trigger><DatePicker.TriggerIndicator /></DatePicker.Trigger>
-              </DateField.Suffix>
-            </DateField.Group>
-            <DatePicker.Popover>
-              <Calendar aria-label="选择到期日期">
-                <Calendar.Header>
-                  <Calendar.Heading />
-                  <Calendar.NavButton slot="previous" />
-                  <Calendar.NavButton slot="next" />
-                </Calendar.Header>
-                <Calendar.Grid>
-                  <Calendar.GridHeader>{(day) => <Calendar.HeaderCell>{day}</Calendar.HeaderCell>}</Calendar.GridHeader>
-                  <Calendar.GridBody>{(date) => <Calendar.Cell date={date} />}</Calendar.GridBody>
-                </Calendar.Grid>
-              </Calendar>
-            </DatePicker.Popover>
-          </DatePicker>
-          {[7, 30, 90].map((n) => <Button key={n} size="sm" variant="ghost" onPress={() => after(n)}>{n} 天后</Button>)}
-          {value <= now && <span className="w-full text-xs text-warning">这个时间已经过了，保存后密钥立即不能用。</span>}
-        </div>
-      )}
-    </div>
   )
 }
 
@@ -209,18 +157,6 @@ function LimitRow({ title, value, onChange }: { title: string; value: LimitForm;
 function ModelsField({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
   const models = useModels()
   const catalog = useMemo(() => bareModelIds((models.data?.models || []).map((m) => m.id)), [models.data])
-  const [text, setText] = useState('')
-  const [hint, setHint] = useState('')
-  const add = (raw: string) => {
-    const next = addModelPattern(value, raw)
-    if (typeof next === 'string') {
-      setHint(next)
-      return
-    }
-    setHint('')
-    setText('')
-    onChange(next)
-  }
   const allowed = allowedModels(value, catalog)
   return (
     <div className="flex flex-col gap-2">
@@ -236,32 +172,7 @@ function ModelsField({ value, onChange }: { value: string[]; onChange: (v: strin
           </TagGroup.List>
         </TagGroup>
       )}
-      <div className="flex flex-wrap items-end gap-2">
-        <ComboBox
-          aria-label="添加模型"
-          allowsCustomValue
-          inputValue={text}
-          onInputChange={(v) => {
-            setText(v)
-            setHint('')
-          }}
-          value={null}
-          onChange={(k) => { if (k != null) add(String(k)) }}
-          className="min-w-56 flex-1"
-        >
-          <ComboBox.InputGroup>
-            <Input placeholder="从目录选，或手填 glm-*" />
-            <ComboBox.Trigger />
-          </ComboBox.InputGroup>
-          <ComboBox.Popover>
-            <ListBox>
-              {catalog.map((id) => <ListBox.Item key={id} id={id} textValue={id}>{id}<ListBox.ItemIndicator /></ListBox.Item>)}
-            </ListBox>
-          </ComboBox.Popover>
-        </ComboBox>
-        <Button size="sm" variant="secondary" isDisabled={!text.trim()} onPress={() => add(text)} className="mb-0.5">添加</Button>
-      </div>
-      {hint && <span className="text-xs text-danger">{hint}</span>}
+      <ModelPatternInput value={value} onChange={onChange} />
       {value.length > 0 && catalog.length > 0 && (
         <p className={`text-xs ${allowed.length ? 'text-muted' : 'text-warning'}`}>
           {allowed.length
@@ -270,6 +181,28 @@ function ModelsField({ value, onChange }: { value: string[]; onChange: (v: strin
         </p>
       )}
     </div>
+  )
+}
+
+/** 账号分组：勾了就只用这些组里的号；还没建分组时不显示 */
+function GroupsField({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+  const groups = useGroups().data ?? []
+  if (groups.length === 0) return null
+  return (
+    <CheckboxGroup value={value} onChange={onChange}>
+      <Label>账号分组</Label>
+      <div className="flex flex-wrap gap-x-4 gap-y-2">
+        {groups.map((g) => (
+          <Checkbox key={g.id} value={g.id}>
+            <Checkbox.Content>
+              <Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>
+              {g.name}<span className="text-xs text-muted">（{g.accounts} 个号）</span>
+            </Checkbox.Content>
+          </Checkbox>
+        ))}
+      </div>
+      <Description>不勾 = 不限，全部的号都能用。勾了就只用这些组里的号，组里的号都接不了时回 503，不借别的号。</Description>
+    </CheckboxGroup>
   )
 }
 
@@ -283,6 +216,7 @@ export function KeyUsageGuide({ k: open, onClose }: { k: ApiKey | null; onClose:
     { title: '密钥', text: k.secret, what: '密钥' },
     { title: 'OpenAI 兼容客户端、Codex 的 Base URL', text: origin + '/v1', what: 'Base URL' },
     { title: 'Claude Code', text: `export ANTHROPIC_BASE_URL=${origin}\nexport ANTHROPIC_AUTH_TOKEN=${k.secret}`, what: 'Claude Code 配置' },
+    { title: 'Codex 联网搜索（MCP，写进 ~/.codex/config.toml）', text: `[mcp_servers.wb2api]\nurl = "${origin}/mcp"\nbearer_token_env_var = "WB2API_KEY"`, what: 'Codex 联网搜索配置' },
   ] : []
   return (
     <Modal.Backdrop isOpen={open != null} onOpenChange={(v) => { if (!v) onClose() }}>
@@ -304,7 +238,7 @@ export function KeyUsageGuide({ k: open, onClose }: { k: ApiKey | null; onClose:
               </div>
             ))}
             <p className="text-xs text-muted">
-              Claude Code 的 Base URL 不带 /v1，其余客户端带 /v1。Codex 把 Base URL 写进 config.toml 的 base_url，env_key 指向的环境变量填密钥。
+              Claude Code 的 Base URL 不带 /v1，其余客户端带 /v1。Codex 把 Base URL 写进 config.toml 的 base_url，env_key 指向的环境变量填密钥；联网搜索那段的 bearer_token_env_var 用同一个变量。Claude Code 自带的 WebSearch 不用配，直接可用。
             </p>
           </Modal.Body>
           <Modal.Footer>

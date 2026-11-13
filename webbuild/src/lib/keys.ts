@@ -72,11 +72,13 @@ export interface KeyForm {
   daily: LimitForm
   total: LimitForm
   models: string[]
+  /** 限定的账号分组 id，空 = 不限 */
+  groups: string[]
 }
 
 const noLimits = (): LimitForm => ({ requests: null, tokens: null, credits: null })
 
-export const emptyKeyForm = (): KeyForm => ({ name: '', note: '', enabled: true, expires: null, daily: noLimits(), total: noLimits(), models: [] })
+export const emptyKeyForm = (): KeyForm => ({ name: '', note: '', enabled: true, expires: null, daily: noLimits(), total: noLimits(), models: [], groups: [] })
 
 function limitForm(l: KeyLimits): LimitForm {
   const f = noLimits()
@@ -93,6 +95,7 @@ export function keyFormFrom(k: ApiKey): KeyForm {
     daily: limitForm(k.daily_limit),
     total: limitForm(k.total_limit),
     models: [...(k.models || [])],
+    groups: [...(k.groups || [])],
   }
 }
 
@@ -115,6 +118,7 @@ export function keyInput(f: KeyForm): KeyInput {
     daily_limit: limitsOut(f.daily),
     total_limit: limitsOut(f.total),
     models: f.models,
+    groups: f.groups,
   }
 }
 
@@ -131,12 +135,14 @@ export function validateKeyForm(f: KeyForm): string | null {
   return null
 }
 
-/** 往白名单里加一项：去空白，带域前缀的拒绝，不区分大小写去重。返回新列表或错误文案 */
+/** 往模型名单（密钥的白名单、账号不接的模型）里加一项：去首尾空白，带域前缀、中间有空格的拒绝，不区分大小写去重。
+ * 返回新列表或错误文案 */
 export function addModelPattern(list: string[], raw: string): string[] | string {
   const p = raw.trim()
   if (!p) return list
-  if (p.includes(':')) return '模型白名单按模型名匹配，不带 cn: / global: 前缀'
-  if (p.length > 128) return '模型白名单的一项最长 128 个字符'
+  if (p.includes(':')) return '按模型名填，不带 cn: / global: 前缀'
+  if (/\s/.test(p)) return '模型名里不能有空格'
+  if (p.length > 128) return '一项最长 128 个字符'
   if (list.some((x) => x.toLowerCase() === p.toLowerCase())) return list
   return [...list, p]
 }
